@@ -1,0 +1,19 @@
+version: '3'
+services:
+  www:
+    image: farmos/farmos:2.x
+    volumes:
+      - ./sites:/opt/drupal/web/sites
+    ports:
+      - "8888:80"
+    restart: always
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: farmos
+      POSTGRES_USER: farmos
+      POSTGRES_DB: farmos
+    volumes:
+      - ./db-data:/var/lib/postgresql/data
+    restart: always

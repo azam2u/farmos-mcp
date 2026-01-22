@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+farmos-venv/
+.env
+
+# MCP
+.roo/
+
+# Debug Scripts (Excluded from production repo)
+debug_*.py
+fix_*.py
+*test*.py
+example.py
+farmos_usage_example.py
+
+# Data/Images
+*.jpg
+*.png
+db-data/
+sites/
+
+# System
+.DS_Store

@@ -1,0 +1,8 @@
+name: farmos
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - podman
+  - podman-compose
+  - git
