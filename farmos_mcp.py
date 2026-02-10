@@ -509,5 +509,297 @@ def create_asset_from_satellite(latitude: float, longitude: float, name: str = "
     except Exception as e:
          return f"Error creating asset: {str(e)}"
 
+@mcp.tool()
+def create_asset_from_sam3(latitude: float, longitude: float, name: str = "SAM3 Detected Field", land_type: str = "bed") -> str:
+    """
+    Create a FarmOS asset using AI (SAM3) to detect the field shape.
+    
+    This tool uses the Segment Anything Model 3 (SAM3) to accurately segment the 
+    object at the center of the satellite image.
+    
+    Args:
+        latitude: Latitude of the center of the field.
+        longitude: Longitude of the center of the field.
+        name: Name of the asset.
+        land_type: Type of land.
+    """
+    import subprocess
+    import sys
+    import json
+    
+    print(f"📡 [SAM3] Analyzing {latitude}, {longitude}...", file=sys.stderr)
+    
+    # 1. Fetch Image (Standard Process)
+    try:
+        # Fixed zoom 18 as validated
+        zoom = 18
+        width = 800
+        height = 800
+        img_path = "latest_sam3_input.jpg"
+        img = greenery_utils.get_mapbox_image(latitude, longitude, zoom, width, height, MAPBOX_TOKEN)
+        cv2.imwrite(img_path, img)
+        img_abs_path = os.path.abspath(img_path)
+    except Exception as e:
+        return f"Error fetching image: {str(e)}"
+
+    # 2. Invoke SAM3 Wrapper
+    # Path to the SAM3 Venv Python (Configurable via env var)
+    lerobot_python = os.environ.get("LEROBOT_PYTHON_PATH", "/home/cvl/farmos_env/sam3-venv/bin/python")
+    # Wrap script path
+    script_path = os.path.abspath("sam3_wrapper.py")
+    
+    cmd = [
+        lerobot_python,
+        script_path,
+        "--image", img_abs_path,
+        "--lat", str(latitude),
+        "--lon", str(longitude),
+        "--zoom", str(zoom)
+    ]
+    
+    print(f"   Executing SAM3 model via {lerobot_python}...", file=sys.stderr)
+    
+    try:
+        # Capture stdout/stderr
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            return f"SAM3 Error: {result.stderr}"
+            
+        # Debug: Log SAM3 output
+        try:
+            with open("/home/cvl/farmos_env/sam3_debug.log", "w") as f:
+                f.write(f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}\n")
+        except:
+            pass
+            
+        # Parse JSON output
+        try:
+            # We filter stdout for the JSON line in case of noise
+            output_lines = result.stdout.splitlines()
+            json_line = next((line for line in output_lines if line.strip().startswith("{")), None)
+            
+            if not json_line:
+                return f"SAM3 Failed. Output: {result.stdout}"
+                
+            data = json.loads(json_line)
+        except json.JSONDecodeError:
+            return f"Failed to parse SAM3 output: {result.stdout}"
+            
+        if data.get("status") != "success":
+            return f"SAM3 processing failed: {data.get('message')}"
+            
+        wkt_geometry = data["wkt"]
+        area_px = data["area_pixels"]
+        print(f"   Success! Detected Region: {area_px} pixels. Score: {data['score']:.2f}", file=sys.stderr)
+
+    except Exception as e:
+        return f"System Error running SAM3: {str(e)}"
+        
+    # 3. Create Asset (Standard Process)
+    farm = get_client()
+    
+    new_asset = {
+        "type": "land",
+        "attributes": {
+            "name": name,
+            "land_type": land_type,
+            "status": "active",
+            "intrinsic_geometry": {
+                "value": wkt_geometry
+            },
+            "is_fixed": True
+        }
+    }
+    
+    try:
+        response = farm.asset.send("land", new_asset)
+        if response and 'id' in response:
+            return f"Successfully created SAM3 Asset '{name}' (ID: {response['id']})"
+        
+        new_id = response.get('data', {}).get('id') or response.get('id')
+        if new_id:
+             return f"Successfully created SAM3 Asset '{name}' (ID: {new_id})"
+        else:
+             return f"Failed to create asset. Response: {response}"
+    except Exception as e:
+         return f"Error creating asset: {str(e)}"
+
+@mcp.tool()
+def collect_fruit_data(fruit: str, latitude: float, longitude: float, name: str = None, duration: int = 30) -> str:
+    """
+    Collect robot training data for a specific fruit at a location.
+    
+    This tool:
+    1. Creates/Ensures a FarmOS asset exists for this field (using SAM3).
+    2. Runs the physical robot (LeRobot) using the trained policy for that fruit.
+    
+    Args:
+        fruit: Name of the fruit (e.g., 'banana').
+        latitude: GPS Latitude.
+        longitude: GPS Longitude.
+        name: Name of the asset (optional).
+        duration: Duration of data collection in seconds (default: 30).
+    """
+    import subprocess
+    import sys
+    import datetime
+    import os
+    import json
+    
+    # 1. Policy Mapping
+    POLICY_MAP = {
+        "banana": "azam2u/detect_banana",
+        "apple": "azam2u/detect_apple1",
+        "orange": "azam2u/detect_orange",
+    }
+    
+    policy_path = POLICY_MAP.get(fruit.lower())
+    if not policy_path:
+        return f"Error: No policy trained for '{fruit}'. Available: {list(POLICY_MAP.keys())}"
+
+    print(f"🤖 Starting Data Collection for {fruit} ({duration}s)...", file=sys.stderr)
+
+    # 2. Create/Get Asset (Reuse SAM3 Logic)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    asset_name = name if name else f"{fruit.capitalize()} Collection {timestamp}"
+    asset_result = create_asset_from_sam3(latitude, longitude, name=asset_name, land_type="bed")
+    
+    # Extract ID
+    asset_id = None
+    if "(ID: " in asset_result:
+        asset_id = asset_result.split("(ID: ")[1].split(")")[0]
+
+    # 3. Run LeRobot Integration
+    robot_type = "so100_follower"
+    # Port updated to match user request /dev/ttyACM0 (was ACM1 in previous code, but user request says ACM0)
+    # User request: --robot.port=/dev/ttyACM0
+    # User request: --robot.port=/dev/ttyACM0
+    robot_port = "/dev/ttyACM0" 
+    # Force MJPG in LeRobot source is now done.
+    cameras = "{ up: {type: opencv, index_or_path: /dev/video0, width: 480, height: 640, fps: 30}}"
+    
+    # Timestamp already defined above for asset name
+    
+    # Determine Dataset ID based on fruit
+    # We append timestamp to ensure a unique dataset is created every time,
+    # avoiding FileExistsError and the need for complex resume logic.
+    if fruit.lower() == "orange":
+        dataset_id = f"azam2u/eval_orange1_{timestamp}"
+    elif fruit.lower() == "apple":
+        dataset_id = f"azam2u/eval_apple2_{timestamp}"
+    else:
+        dataset_id = f"azam2u/eval_farmos_{fruit}_{timestamp}"
+    
+    lerobot_python = os.environ.get("LEROBOT_PYTHON_PATH", "/home/cvl/miniconda3/envs/lerobot/bin/python")
+    
+    # Construct Command with Timeout
+    # We use 'timeout --signal=SIGINT' to simulate Ctrl+C so LeRobot saves the video properly.
+    cmd = [
+        "timeout", 
+        f"--signal=SIGINT", 
+        f"{duration}s",
+        lerobot_python,
+        "-m", "lerobot.record", # Correct module path for v0.3.4
+        f"--robot.type={robot_type}",
+        f"--robot.port={robot_port}",
+        f"--robot.cameras={cameras}",
+        f"--robot.id=f1",
+        "--display_data=true", 
+        f"--dataset.repo_id={dataset_id}",
+        f"--dataset.single_task={fruit}",
+        f"--policy.path={policy_path}"
+    ]
+    
+    # Debug: Log full command
+    try:
+        with open("/home/cvl/farmos_env/cmd_debug.log", "a") as f:
+            f.write(f"CMD: {' '.join(cmd)}\n")
+    except:
+        pass
+    
+    # 4. Log Intent to FarmOS
+    if asset_id:
+        log_result = create_log(
+            name=f"Robot Data Collection: {fruit}",
+            type="activity",
+            asset_names=[asset_name],
+            attributes_json=json.dumps({
+                "notes": f"Running policy {policy_path} for {duration} seconds. Dataset: {dataset_id}"
+            })
+        )
+        
+    # Extract Log ID
+    log_id = None
+    if "ID: " in log_result:
+        log_id = log_result.split("ID: ")[1].split(")")[0]
+        
+    # Debug: verify log creation
+    try:
+        with open("/home/cvl/farmos_env/log_debug.txt", "w") as f:
+            f.write(f"Log ID: {log_id}\nResult: {log_result}\n")
+    except:
+        pass
+
+    # 5. Launch Robot (Background)
+    # We use start_new_session=True to detach from parent, preventing signal propagation if parent exits/restarts
+    robot_log = open("/home/cvl/farmos_env/robot_debug.log", "w")
+    subprocess.Popen(cmd, stdout=robot_log, stderr=robot_log, start_new_session=True)
+    # We can close the FD in the parent, child keeps it
+    robot_log.close()
+
+    # 6. Launch Camera Logger (Background)
+    if log_id:
+        try:
+            cam_python = "/home/cvl/farmos_env/farmos-venv/bin/python"
+            cam_script = "/home/cvl/farmos_env/camera_logger.py"
+            cam_cmd = [
+                cam_python,
+                cam_script,
+                "--log_id", log_id,
+                "--duration", str(duration),
+                "--camera", "2",
+                "--interval", "3",
+                "--start_delay", "10" 
+            ]
+            
+            cam_log = open("/home/cvl/farmos_env/camera_debug.log", "w")
+            subprocess.Popen(cam_cmd, stdout=cam_log, stderr=cam_log, start_new_session=True)
+            cam_log.close()
+                
+            print(f"📸 Camera Logger Launched for Log ID {log_id}", file=sys.stderr)
+        except Exception as e:
+            print(f"⚠️ Failed to launch camera logger: {e}", file=sys.stderr)
+
+    # 5. Launch Robot Process (Background)
+    try:
+        # DEBUG: Redirect to file instead of devnull to catch errors
+        debug_log_path = "/home/cvl/farmos_env/robot_debug.log"
+        with open(debug_log_path, 'w') as log_file:
+             # We use Popen to launch without blocking, but write to log
+             process = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
+        
+        # Build Result Message
+        msg = [
+            f"✅ Asset Created: '{asset_name}' (ID: {asset_id})"
+        ]
+        
+        if log_id:
+             msg.append(f"✅ Log Created: ID {log_id}")
+             msg.append(f"📸 Camera Recording Started (Cam 2)")
+        else:
+             msg.append(f"⚠️ Log Creation Failed: {log_result}")
+             msg.append(f"⚠️ Camera Recording SKIPPED (No Log ID)")
+             
+        msg.append(f"🚀 Robot Policy Launched (PID: {process.pid})")
+        msg.append(f"   - Policy: {policy_path}")
+        msg.append(f"   - Log File: {debug_log_path}")
+        msg.append("The robot window should appear shortly. If not, check the log file.")
+        
+        return "\n".join(msg)
+        
+    except Exception as e:
+        return f"Asset created, but failed to launch robot: {e}"
+
 if __name__ == "__main__":
     mcp.run()
