@@ -9,3 +9,6 @@ lerobot
 torch
 numpy
 Pillow
+
+transformers
+accelerate
