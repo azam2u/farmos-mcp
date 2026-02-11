@@ -43,10 +43,12 @@ pip install -r requirements.txt
 
 *Note: LeRobot installation on Pi might require building from source if wheels aren't available.*
 ```bash
-pip install "lerobot[pi]" 
+# Ensure you have the latest version to support policies with embedded stats
+pip install --upgrade "lerobot[pi]" 
 # OR if that fails:
 git clone https://github.com/huggingface/lerobot.git
 cd lerobot
+git pull
 pip install -e .
 cd ..
 ```

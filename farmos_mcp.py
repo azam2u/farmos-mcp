@@ -651,7 +651,7 @@ def collect_fruit_data(fruit: str, latitude: float, longitude: float, name: str 
     POLICY_MAP = {
         "banana": "azam2u/detect_banana",
         "apple": "azam2u/detect_apple1",
-        "orange": "azam2u/detect_orange",
+        "orange": "azam2u/detect_orange_fix",
     }
     
     policy_path = POLICY_MAP.get(fruit.lower())
